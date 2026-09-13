@@ -6,14 +6,16 @@
 # 기존 설정은 보존하면서 'korean-stats' 항목만 추가/갱신합니다.
 #
 # 사용:
-#   curl -fsSL https://raw.githubusercontent.com/chrisryugj/korean-stats-mcp/main/install.sh | bash
-#   curl -fsSL https://raw.githubusercontent.com/chrisryugj/korean-stats-mcp/main/install.sh | bash -s -- --client cursor
+#   bash install.sh
+#   bash install.sh --client cursor
+# 원격 설치는 README의 버전 태그 + SHA-256 검증 절차를 사용하세요.
 #
 
 set -euo pipefail
 
-REMOTE_URL="https://korean-stats-mcp.fly.dev/mcp"
+REMOTE_URL="https://mcp.gomdori.app/stats"
 SERVER_NAME="korean-stats"
+MCP_REMOTE_PACKAGE="mcp-remote@0.1.38"
 CLIENT="all"  # claude|cursor|windsurf|all
 
 # CLI 인자
@@ -39,6 +41,19 @@ EOF
     *) echo "알 수 없는 옵션: $1" >&2; exit 1 ;;
   esac
 done
+
+if [[ "$REMOTE_URL" =~ ^https://[^/@?#[:space:]]+([/?#].*)?$ ]]; then
+  :
+elif [[ "$REMOTE_URL" =~ ^http://(localhost|127\.0\.0\.1|\[::1\])(:[0-9]{1,5})?([/?#].*)?$ ]]; then
+  :
+else
+  echo "원격 URL은 HTTPS 또는 로컬 loopback HTTP만 허용됩니다: $REMOTE_URL" >&2
+  exit 1
+fi
+if [[ "$REMOTE_URL" == *$'\n'* || "$REMOTE_URL" == *$'\r'* || "$REMOTE_URL" == *$'\t'* ]]; then
+  echo "원격 URL에 제어 문자를 사용할 수 없습니다." >&2
+  exit 1
+fi
 
 # 색상
 RED=$'\033[0;31m'; GREEN=$'\033[0;32m'; YELLOW=$'\033[0;33m'; BLUE=$'\033[0;34m'; NC=$'\033[0m'
@@ -91,25 +106,48 @@ merge_config() {
       .mcpServers = (.mcpServers // {}) * $new
     ' "$file" > "$tmp" && mv "$tmp" "$file"
   else
-    python3 - <<PY
+    python3 - "$file" "$config_json" <<'PY'
 import json, sys
-path = "$file"
-new = json.loads('''$config_json''')
+path, raw_config = sys.argv[1:3]
+new = json.loads(raw_config)
 try:
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         cfg = json.load(f)
 except Exception:
     cfg = {}
 cfg.setdefault("mcpServers", {}).update(new)
-with open(path, "w") as f:
+with open(path, "w", encoding="utf-8") as f:
     json.dump(cfg, f, indent=2, ensure_ascii=False)
 PY
   fi
 }
 
-CLAUDE_CONFIG='{"'"$SERVER_NAME"'":{"command":"npx","args":["-y","mcp-remote","'"$REMOTE_URL"'"]}}'
-CURSOR_CONFIG='{"'"$SERVER_NAME"'":{"command":"npx","args":["-y","mcp-remote","'"$REMOTE_URL"'"]}}'
-WINDSURF_CONFIG='{"'"$SERVER_NAME"'":{"serverUrl":"'"$REMOTE_URL"'"}}'
+build_remote_config() {
+  local kind="$1"
+  if [[ "$JSON_TOOL" == "jq" ]]; then
+    if [[ "$kind" == "windsurf" ]]; then
+      jq -cn --arg name "$SERVER_NAME" --arg url "$REMOTE_URL" '{($name): {serverUrl: $url}}'
+    else
+      jq -cn --arg name "$SERVER_NAME" --arg url "$REMOTE_URL" \
+        --arg package "$MCP_REMOTE_PACKAGE" \
+        '{($name): {command: "npx", args: ["-y", $package, $url]}}'
+    fi
+  else
+    python3 - "$SERVER_NAME" "$REMOTE_URL" "$kind" "$MCP_REMOTE_PACKAGE" <<'PY'
+import json, sys
+name, url, kind, package = sys.argv[1:5]
+server = {"serverUrl": url} if kind == "windsurf" else {
+    "command": "npx",
+    "args": ["-y", package, url],
+}
+print(json.dumps({name: server}, ensure_ascii=False))
+PY
+  fi
+}
+
+CLAUDE_CONFIG="$(build_remote_config command)"
+CURSOR_CONFIG="$CLAUDE_CONFIG"
+WINDSURF_CONFIG="$(build_remote_config windsurf)"
 
 install_claude() {
   local path
@@ -149,11 +187,16 @@ install_windsurf() {
 
 # 헬스 체크
 log "원격 서버 헬스 체크..."
-if curl -sSf "$REMOTE_URL%2Fhealth" >/dev/null 2>&1 || \
-   curl -sSf "${REMOTE_URL%/mcp}/health" >/dev/null 2>&1; then
+if [[ "$REMOTE_URL" == */mcp ]]; then
+  HEALTH_URL="${REMOTE_URL%/mcp}/health"
+else
+  HEALTH_URL="${REMOTE_URL%/}/health"
+fi
+if curl -sSf -- "$HEALTH_URL" >/dev/null 2>&1; then
   ok "원격 서버 응답 정상"
 else
-  warn "원격 서버 헬스 체크 실패 (계속 진행). URL: $REMOTE_URL"
+  err "원격 서버 헬스 체크 실패. 설정을 변경하지 않습니다. URL: $REMOTE_URL"
+  exit 1
 fi
 echo
 

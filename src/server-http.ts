@@ -8,16 +8,18 @@
  */
 
 import express from 'express';
-import { timingSafeEqual } from 'node:crypto';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { createServer, SERVER_VERSION, TOOL_COUNT } from './server.js';
+import { assertHttpAuthConfigured, isBearerAuthorized } from './security/httpAuth.js';
+import { isJsonRpcBatch } from './security/httpAdmission.js';
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
 const BODY_LIMIT = process.env.MCP_BODY_LIMIT || '200kb';
 const RATE_LIMIT_RPM = parseInt(process.env.RATE_LIMIT_RPM || '60', 10);
 const TRUST_PROXY_RAW = process.env.TRUST_PROXY ?? '1';
-// 옵셔널 Bearer 토큰. 설정 시 /mcp POST에 인증 요구, 미설정 시 공개(하위호환).
+// HTTP는 인증 기본 거부. 공개 개발 서버는 명시적 위험 수락 환경변수로만 허용.
 const AUTH_TOKEN = process.env.MCP_AUTH_TOKEN || '';
+const ALLOW_INSECURE_PUBLIC = process.env.MCP_ALLOW_INSECURE_PUBLIC === '1';
 // CORS 허용 origin. 기본 '*'. 신뢰 도메인만 허용하려면 명시적 origin 지정.
 const CORS_ORIGIN = process.env.MCP_CORS_ORIGIN || '*';
 
@@ -34,6 +36,7 @@ function scrub(s: string): string {
 }
 
 async function main() {
+  assertHttpAuthConfigured(AUTH_TOKEN, ALLOW_INSECURE_PUBLIC);
   const app = express();
   app.set('trust proxy', parseTrustProxy(TRUST_PROXY_RAW));
 
@@ -46,6 +49,19 @@ async function main() {
   }
 
   app.use(express.json({ limit: BODY_LIMIT }));
+  // Never let Express's default HTML handler expose parser stacks or paths.
+  app.use(((error, _req, res, _next) => {
+    const tooLarge = error?.type === 'entity.too.large';
+    const invalidJson = error?.type === 'entity.parse.failed';
+    const status = tooLarge ? 413 : 400;
+    res.status(status).json({
+      jsonrpc: '2.0', id: null,
+      error: {
+        code: tooLarge ? -32000 : invalidJson ? -32700 : -32600,
+        message: tooLarge ? 'Request body too large' : invalidJson ? 'Parse error' : 'Invalid request body',
+      },
+    });
+  }) as express.ErrorRequestHandler);
 
   // Rate limit: per-IP per minute
   if (RATE_LIMIT_RPM > 0) {
@@ -113,21 +129,19 @@ async function main() {
 
   // MCP endpoint (POST only — stateless)
   app.post('/mcp', async (req, res) => {
-    // 옵셔널 Bearer 인증 — MCP_AUTH_TOKEN 설정 시에만 검사 (미설정 시 공개).
-    // 공개 배포 시 KOSIS 키 쿼터 소진·프록시 악용 방지에 토큰 설정 권장.
-    if (AUTH_TOKEN) {
-      const auth = req.headers.authorization ?? '';
-      const token = auth.startsWith('Bearer ') ? auth.slice(7) : '';
-      // timing-safe 비교 — 단순 !== 는 타이밍 부채널로 토큰 추측 여지
-      const a = Buffer.from(token);
-      const b = Buffer.from(AUTH_TOKEN);
-      if (a.length !== b.length || !timingSafeEqual(a, b)) {
-        return res.status(401).json({
-          jsonrpc: '2.0',
-          error: { code: -32001, message: 'Unauthorized' },
-          id: null,
-        });
-      }
+    if (AUTH_TOKEN && !isBearerAuthorized(req.headers.authorization, AUTH_TOKEN)) {
+      return res.status(401).json({
+        jsonrpc: '2.0',
+        error: { code: -32001, message: 'Unauthorized' },
+        id: null,
+      });
+    }
+    if (isJsonRpcBatch(req.body)) {
+      return res.status(400).json({
+        jsonrpc: '2.0',
+        error: { code: -32600, message: 'JSON-RPC batch requests are not supported.' },
+        id: null,
+      });
     }
     let server: ReturnType<typeof createServer> | undefined;
     let transport: StreamableHTTPServerTransport | undefined;
@@ -179,7 +193,7 @@ async function main() {
   const httpServer = app.listen(PORT, () => {
     console.log(`[korean-stats-mcp] HTTP server listening on :${PORT}`);
     console.log(
-      `[korean-stats-mcp] auth: ${AUTH_TOKEN ? 'enabled (Bearer)' : 'disabled (public)'} · ` +
+      `[korean-stats-mcp] auth: ${AUTH_TOKEN ? 'enabled (Bearer)' : 'explicit insecure public mode'} · ` +
         `CORS origin: ${CORS_ORIGIN} · rate limit: ${RATE_LIMIT_RPM} rpm`
     );
   });

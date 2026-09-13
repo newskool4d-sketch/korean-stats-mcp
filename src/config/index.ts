@@ -19,6 +19,10 @@ export const config = {
   cache: {
     ttlHours: parseInt(process.env.CACHE_TTL_HOURS || '6', 10),
     maxKeys: 1000,
+    maxRetainedBytes: parseInt(
+      process.env.CACHE_MAX_RETAINED_BYTES || String(64 * 1024 * 1024),
+      10
+    ),
   },
 
   compareStatistics: {

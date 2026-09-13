@@ -76,6 +76,33 @@ describe('CacheManager', () => {
     await cache.getOrFetch('t', { k: 2 }, fetcher);
     expect(calls).toBe(1);
   });
+
+  it('용량 도달 시 최근 사용 항목을 보존하고 오래된 항목을 축출', async () => {
+    const cache = new CacheManager(2);
+    await cache.getOrFetch('t', { k: 'a' }, async () => 'A');
+    await cache.getOrFetch('t', { k: 'b' }, async () => 'B');
+    await cache.getOrFetch('t', { k: 'a' }, async () => 'unexpected');
+    await expect(cache.getOrFetch('t', { k: 'c' }, async () => 'C')).resolves.toBe('C');
+
+    let aFetched = false;
+    expect(
+      await cache.getOrFetch('t', { k: 'a' }, async () => {
+        aFetched = true;
+        return 'new-A';
+      })
+    ).toBe('A');
+    expect(aFetched).toBe(false);
+
+    let bFetched = false;
+    expect(
+      await cache.getOrFetch('t', { k: 'b' }, async () => {
+        bFetched = true;
+        return 'new-B';
+      })
+    ).toBe('new-B');
+    expect(bFetched).toBe(true);
+    expect(cache.getStats().keys).toBeLessThanOrEqual(2);
+  });
 });
 
 describe('extractYearCount', () => {

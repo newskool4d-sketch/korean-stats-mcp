@@ -23,6 +23,100 @@ class KosisApiError extends Error {
   }
 }
 
+export const DEFAULT_KOSIS_JSON_MAX_BYTES = 10 * 1024 * 1024;
+export const DEFAULT_KOSIS_JSON_MAX_ROWS = 10_000;
+
+function resolvePositiveLimit(raw: string | undefined, fallback: number, name: string): number {
+  if (raw === undefined || raw === '') return fallback;
+  if (!/^\d+$/.test(raw)) throw new KosisApiError('INVALID_LIMIT', `${name} must be a positive integer.`);
+  const parsed = Number(raw);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+    throw new KosisApiError('INVALID_LIMIT', `${name} must be a positive safe integer.`);
+  }
+  return parsed;
+}
+
+export async function readKosisJsonResponseWithLimit(
+  response: Response,
+  maxBytes: number,
+  maxRows: number
+): Promise<Record<string, unknown> | unknown[]> {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0) {
+    throw new KosisApiError('INVALID_LIMIT', 'KOSIS JSON size limit must be a positive safe integer.');
+  }
+  if (!Number.isSafeInteger(maxRows) || maxRows <= 0) {
+    throw new KosisApiError('INVALID_LIMIT', 'KOSIS JSON row limit must be a positive safe integer.');
+  }
+
+  const contentLength = response.headers.get('content-length');
+  if (contentLength !== null) {
+    const declaredBytes = Number(contentLength);
+    if (Number.isFinite(declaredBytes) && declaredBytes > maxBytes) {
+      try {
+        await response.body?.cancel();
+      } catch {
+        // Preserve the deterministic size-limit error if transport cleanup fails.
+      }
+      throw new KosisApiError(
+        'RESPONSE_TOO_LARGE',
+        `KOSIS JSON size limit exceeded (${declaredBytes} > ${maxBytes} bytes).`
+      );
+    }
+  }
+  if (!response.body) throw new KosisApiError('EMPTY_RESPONSE', 'KOSIS JSON response body is empty.');
+
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let totalBytes = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      totalBytes += value.byteLength;
+      if (totalBytes > maxBytes) {
+        await reader.cancel();
+        throw new KosisApiError(
+          'RESPONSE_TOO_LARGE',
+          `KOSIS JSON size limit exceeded (${totalBytes} > ${maxBytes} bytes).`
+        );
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  const bytes = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(new TextDecoder().decode(bytes));
+  } catch (error) {
+    throw new KosisApiError('INVALID_JSON', 'KOSIS API returned invalid JSON.', error as Error);
+  }
+
+  const rows = Array.isArray(parsed)
+    ? parsed
+    : parsed && typeof parsed === 'object' && Array.isArray((parsed as Record<string, unknown>).result)
+      ? ((parsed as Record<string, unknown>).result as unknown[])
+      : null;
+  if (rows && rows.length > maxRows) {
+    throw new KosisApiError(
+      'ROW_LIMIT_EXCEEDED',
+      `KOSIS JSON row limit exceeded (${rows.length} > ${maxRows} rows).`
+    );
+  }
+  if (!parsed || typeof parsed !== 'object') {
+    throw new KosisApiError('INVALID_JSON_SHAPE', 'KOSIS API returned an invalid JSON shape.');
+  }
+  return parsed as Record<string, unknown> | unknown[];
+}
+
 /**
  * KOSIS API 클라이언트
  */
@@ -63,6 +157,16 @@ export class KosisClient {
 
     const TIMEOUT_MS = 15000;
     const MAX_ATTEMPTS = 3;
+    const maxResponseBytes = resolvePositiveLimit(
+      process.env.KOSIS_JSON_MAX_BYTES,
+      DEFAULT_KOSIS_JSON_MAX_BYTES,
+      'KOSIS_JSON_MAX_BYTES'
+    );
+    const maxResponseRows = resolvePositiveLimit(
+      process.env.KOSIS_JSON_MAX_ROWS,
+      DEFAULT_KOSIS_JSON_MAX_ROWS,
+      'KOSIS_JSON_MAX_ROWS'
+    );
 
     for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
       const controller = new AbortController();
@@ -82,23 +186,28 @@ export class KosisClient {
           );
         }
 
-        const data = (await response.json()) as Record<string, unknown>;
+        const data = await readKosisJsonResponseWithLimit(
+          response,
+          maxResponseBytes,
+          maxResponseRows
+        );
+        const objectData = !Array.isArray(data) ? data : null;
 
         // KOSIS 응답 에러 — 영구 실패
-        if (data.err || data.errMsg) {
+        if (objectData?.err || objectData?.errMsg) {
           throw new KosisApiError(
-            (data.err as string) || 'API_ERROR',
-            (data.errMsg as string) || '알 수 없는 API 오류'
+            (objectData.err as string) || 'API_ERROR',
+            (objectData.errMsg as string) || '알 수 없는 API 오류'
           );
         }
 
         if (!Array.isArray(data)) {
-          if (data.result && Array.isArray(data.result)) {
-            return data.result as T[];
+          if (objectData?.result && Array.isArray(objectData.result)) {
+            return objectData.result as T[];
           }
           // 단일 객체 응답 (statisticsExplData.do 등) — [obj]로 정규화
-          if (data && typeof data === 'object' && Object.keys(data).length > 0) {
-            return [data as T];
+          if (objectData && Object.keys(objectData).length > 0) {
+            return [objectData as T];
           }
           return [];
         }

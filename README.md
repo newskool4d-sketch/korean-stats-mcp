@@ -196,31 +196,55 @@ Claude Desktop / Cursor / Windsurf에 원격 MCP 서버를 등록합니다.
 
 설치 스크립트가 클라이언트 설정 파일을 자동으로 찾아 `korean-stats` 항목을 등록합니다. 기존 설정은 백업(`*.bak.*`) 후 보존되고, 다른 MCP 서버 항목은 그대로 둡니다.
 
-**macOS / Linux** (`jq` 또는 `python3` 필요)
+**macOS / Linux** (`jq` 또는 `python3`, `sha256sum` 또는 `shasum` 필요)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/chrisryugj/korean-stats-mcp/main/install.sh | bash
+expected_sha256='f471fe3e3393495499a2bf883a94ef912495df37d7c7c492fe97be504205812a'
+installer="$(mktemp)"
+trap 'rm -f "$installer"' EXIT
+curl -fsSL --proto '=https' \
+  "https://raw.githubusercontent.com/chrisryugj/korean-stats-mcp/v1.8.6/install.sh" \
+  -o "$installer"
+if command -v sha256sum >/dev/null 2>&1; then
+  actual_sha256="$(sha256sum "$installer" | awk '{print $1}')"
+else
+  actual_sha256="$(shasum -a 256 "$installer" | awk '{print $1}')"
+fi
+[[ "$actual_sha256" == "$expected_sha256" ]] || { echo 'SHA-256 검증 실패' >&2; exit 1; }
+bash "$installer"
 ```
 
 **Windows (PowerShell)**
 
 ```powershell
-irm https://raw.githubusercontent.com/chrisryugj/korean-stats-mcp/main/install.ps1 | iex
+$version = 'v1.8.6'
+$expectedSha256 = 'bf5e46142ba3ed203f79f6911fcfd6f1dcd4d1a45aa7c1aed8e973b15fb8e55d'
+$installer = Join-Path ([IO.Path]::GetTempPath()) "korean-stats-install-$version-$([guid]::NewGuid()).ps1"
+try {
+  Invoke-WebRequest "https://raw.githubusercontent.com/chrisryugj/korean-stats-mcp/v1.8.6/install.ps1" -OutFile $installer
+  $actualSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $installer).Hash.ToLowerInvariant()
+  if ($actualSha256 -ne $expectedSha256) { throw 'SHA-256 검증 실패' }
+  & $installer
+} finally {
+  Remove-Item -LiteralPath $installer -Force -ErrorAction SilentlyContinue
+}
 ```
 
 기본값은 세 클라이언트 모두 등록(`all`)입니다. 특정 클라이언트만 설치하려면 `--client`(`claude`·`cursor`·`windsurf`·`all`) 옵션을 씁니다.
 
 ```bash
 # macOS / Linux — Cursor만
-curl -fsSL https://raw.githubusercontent.com/chrisryugj/korean-stats-mcp/main/install.sh | bash -s -- --client cursor
+# 위 검증 절차의 마지막 명령을 다음과 같이 변경
+bash "$installer" --client cursor
 ```
 
 ```powershell
 # Windows — Cursor만
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/chrisryugj/korean-stats-mcp/main/install.ps1))) -Client cursor
+# 위 검증 절차의 실행 명령을 다음과 같이 변경
+& $installer -Client cursor
 ```
 
-스크립트는 등록 전 원격 서버 헬스 체크를 수행합니다. 설치 후 해당 앱을 재시작하세요.
+다운로드 URL은 변경 가능한 `main` 브랜치가 아니라 릴리스 태그에 고정되며, 체크섬이 다르면 실행하지 않습니다. 스크립트는 등록 전 원격 서버 헬스 체크도 수행합니다. 설치 후 해당 앱을 재시작하세요.
 
 #### 수동 등록
 
@@ -237,7 +261,7 @@ curl -fsSL https://raw.githubusercontent.com/chrisryugj/korean-stats-mcp/main/in
   "mcpServers": {
     "korean-stats": {
       "command": "npx",
-      "args": ["-y", "mcp-remote", "https://mcp.gomdori.app/stats"]
+      "args": ["-y", "mcp-remote@0.1.38", "https://mcp.gomdori.app/stats"]
     }
   }
 }

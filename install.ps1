@@ -3,19 +3,18 @@
 # Claude Desktop / Cursor / Windsurf 설정에 원격 MCP 서버를 등록합니다.
 #
 # 사용:
-#   irm https://raw.githubusercontent.com/chrisryugj/korean-stats-mcp/main/install.ps1 | iex
-#
-# 또는 옵션 지정:
-#   $script = irm https://raw.githubusercontent.com/chrisryugj/korean-stats-mcp/main/install.ps1
-#   & ([scriptblock]::Create($script)) -Client cursor
+#   & .\install.ps1
+#   & .\install.ps1 -Client cursor
+# 원격 설치는 README의 버전 태그 + SHA-256 검증 절차를 사용하세요.
 
 param(
   [ValidateSet("claude", "cursor", "windsurf", "all")]
   [string]$Client = "all",
-  [string]$Url = "https://korean-stats-mcp.fly.dev/mcp"
+  [string]$Url = "https://mcp.gomdori.app/stats"
 )
 
 $ServerName = "korean-stats"
+$McpRemotePackage = "mcp-remote@0.1.38"
 
 function Write-Info  { param($m) Write-Host "[korean-stats-mcp] $m" -ForegroundColor Blue }
 function Write-Ok    { param($m) Write-Host "✓ $m" -ForegroundColor Green }
@@ -64,7 +63,7 @@ function Merge-Config {
 
 $RemoteServer = @{
   command = "npx"
-  args    = @("-y", "mcp-remote", $Url)
+  args    = @("-y", $McpRemotePackage, $Url)
 }
 $WindsurfServer = @{
   serverUrl = $Url
@@ -94,13 +93,18 @@ function Install-Windsurf {
 # 헬스 체크
 Write-Info "원격 서버 헬스 체크..."
 try {
-  $healthUrl = $Url -replace "/mcp$", "/health"
+  $healthUrl = if ($Url -match "/mcp/?$") {
+    $Url -replace "/mcp/?$", "/health"
+  } else {
+    $Url.TrimEnd('/') + "/health"
+  }
   $resp = Invoke-WebRequest -Uri $healthUrl -UseBasicParsing -TimeoutSec 10
   if ($resp.StatusCode -eq 200) {
     Write-Ok "원격 서버 응답 정상"
   }
 } catch {
-  Write-Warn "원격 서버 헬스 체크 실패 (계속 진행)."
+  Write-Err "원격 서버 헬스 체크 실패. 설정을 변경하지 않습니다."
+  exit 1
 }
 Write-Host ""
 

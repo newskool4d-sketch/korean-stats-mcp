@@ -11,7 +11,7 @@
  */
 
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { createServer } from './server.js';
+import { createServer, TOOL_COUNT } from './server.js';
 
 async function main() {
   console.error('🇰🇷 Korea Stats MCP 서버 시작...');
@@ -22,12 +22,25 @@ async function main() {
 
     // stdio 트랜스포트 생성 및 연결
     const transport = new StdioServerTransport();
+    // The SDK reports decode failures through onerror, without a request ID.
+    // Return a protocol error so clients do not wait indefinitely.
+    transport.onerror = (error) => {
+      const code = error instanceof SyntaxError ? -32700
+        : error.name === 'ZodError' ? -32600 : undefined;
+      if (code !== undefined) {
+        void transport.send({ jsonrpc: '2.0',
+          error: { code, message: code === -32700 ? 'Parse error' : 'Invalid Request' },
+        }).catch(() => console.error('Failed to send protocol error'));
+      }
+    };
     await server.connect(transport);
 
     console.error('✅ MCP 서버가 성공적으로 시작되었습니다.');
-    console.error('📊 사용 가능한 도구 (12개):');
-    console.error('   - quick_stats: ⭐ 빠른 조회 (91개 키워드)');
+    console.error(`📊 사용 가능한 도구 (${TOOL_COUNT}개):`);
+    console.error('   - quick_stats: ⭐ 빠른 조회 (92개 키워드)');
     console.error('   - quick_trend: ⭐ 추세 분석');
+    console.error('   - quick_rank: 전국 순위');
+    console.error('   - explain_statistic: 출처 각주 생성');
     console.error('   - chain_region_brief: ⛓ 지역 종합 브리핑 (speech 옵션)');
     console.error('   - chain_compare_regions: ⛓ N지역×M지표 매트릭스 (전국 17개)');
     console.error('   - chain_policy_indicator: ⛓ 정책 영역 시계열');
